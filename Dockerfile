@@ -16,6 +16,6 @@ COPY . .
 RUN chown -R user:user /app
 USER user
 
-EXPOSE 7860
-ENV PORT=7860
+EXPOSE 8000
+ENV PORT=8000
 CMD ["python", "-u", "xiaozhi_private_server.py"]
