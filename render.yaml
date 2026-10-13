@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: joy-super-ai
+    runtime: docker
+    plan: free
+    region: singapore
+    envVars:
+      - key: PORT
+        value: 8000
+    healthCheckPath: /
