@@ -564,7 +564,7 @@ def make_app():
     return app
 
 if __name__ == "__main__":
-    port = 8000
+    port = int(os.environ.get("PORT", 8000))
     print("=" * 70, flush=True)
     print("🚀 JOY SUPER AI SERVER - 11 KEYS ROTATION POOL GEMINI 3.8 FLASH", flush=True)
     print(f"📡 WebSocket & Dashboard tại: http://172.31.98.201:{port}/", flush=True)
