@@ -13,6 +13,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import xml.etree.ElementTree as ET
+import html
 import aiohttp
 from aiohttp import web, WSMsgType
 import miniaudio
@@ -55,8 +56,8 @@ Phong cách trả lời:
 """
 
 MODELS_ORDER = [
-    'gemini-3.8-flash',
     'gemini-3-flash-preview',
+    'gemini-3.8-flash',
     'gemini-3.5-flash',
     'gemini-3.1-flash-lite-preview'
 ]
@@ -163,63 +164,119 @@ def should_search_live(prompt):
     keywords = [
         "hôm nay", "đêm nay", "tối nay", "ngày mai", "sáng mai", "bóng đá", "c1", "champions league",
         "ngoại hạng", "thời tiết", "giá vàng", "tin tức", "mới nhất", "kết quả", "tỉ số",
-        "lịch thi đấu", "vừa rồi", "ai thắng", "trận", "bảng xếp hạng", "giá xăng", "thời sự"
+        "lịch thi đấu", "vừa rồi", "ai thắng", "trận", "bảng xếp hạng", "giá xăng", "thời sự",
+        "euro", "world cup", "la liga", "serie a", "bundesliga", "v-league"
     ]
     lower = prompt.lower()
     return any(k in lower for k in keywords)
 
-def get_clean_search_query(prompt, day, month):
-    lower = prompt.lower()
-    if "c1" in lower or "champions league" in lower:
-        return f"lịch thi đấu cúp c1 champions league hôm nay {day}/{month}"
-    elif "ngoại hạng" in lower or "epl" in lower or "premier league" in lower:
-        return f"lịch thi đấu ngoại hạng anh hôm nay {day}/{month}"
-    elif "thời tiết" in lower:
-        return f"dự báo thời tiết hôm nay {day}/{month}"
-    elif "giá vàng" in lower:
-        return f"giá vàng hôm nay {day}/{month}"
-    elif "tin tức" in lower or "thời sự" in lower:
-        return f"tin tức thời sự mới nhất hôm nay {day}/{month}"
-    return f"{prompt} {day}/{month}"
+def fetch_sports_schedule(prompt):
+    url = "https://bongdaplus.vn/lich-thi-dau-bong-da.html"
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            raw_html = r.read().decode('utf-8', errors='ignore')
+    except Exception:
+        return []
 
-async def fetch_realtime_news_async(query):
+    content = html.unescape(raw_html) if 'html' in globals() else raw_html
+    tables = re.findall(r'<table[^>]*>(.*?)</table>', content, re.DOTALL)
+    if not tables:
+        return []
+
+    rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tables[0], re.DOTALL)
+    matches = []
+    current_time = ""
+    current_league = ""
+    
+    prompt_lower = prompt.lower()
+    is_c1 = "c1" in prompt_lower or "champions league" in prompt_lower
+    is_epl = "ngoại hạng" in prompt_lower or "premier league" in prompt_lower or "hạng nhất" in prompt_lower
+    
+    for r in rows:
+        cells = re.findall(r'<td[^>]*>(.*?)</td>', r, re.DOTALL)
+        clean = [" ".join(re.sub(r'<[^>]+>', ' ', c).split()) for c in cells]
+        if len(clean) == 1 and len(clean[0]) > 3:
+            current_league = clean[0]
+            continue
+        
+        match_info = ""
+        for idx, col in enumerate(clean):
+            if "vs" in col.lower():
+                match_info = re.sub(r'\(.*?\)', '', col).strip()
+                if idx > 0 and (":" in clean[idx-1] or "/" in clean[idx-1]):
+                    current_time = clean[idx-1]
+                break
+        
+        if match_info:
+            league_lower = current_league.lower()
+            if is_c1:
+                if "champions league" in league_lower and "afc" not in league_lower:
+                    matches.append(f"{current_time}: {match_info}")
+            elif is_epl:
+                if "anh" in league_lower:
+                    matches.append(f"{current_league} - {current_time}: {match_info}")
+            else:
+                matches.append(f"{current_league} - {current_time}: {match_info}")
+                
+    return matches
+
+def fetch_general_search(query):
+    snippets = []
+    # 1. Bing search
+    try:
+        url = f"https://www.bing.com/search?q={urllib.parse.quote(query)}"
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7'
+        })
+        with urllib.request.urlopen(req, timeout=4) as r:
+            html_text = r.read().decode('utf-8', errors='ignore')
+            results = re.findall(r'<li class="b_algo"[^>]*>.*?<h2><a[^>]*>(.*?)</a></h2>.*?<p[^>]*>(.*?)</p>', html_text, re.DOTALL)
+            for t, s in results[:4]:
+                ct = re.sub(r'<[^>]+>', '', t).strip()
+                cs = re.sub(r'<[^>]+>', '', s).strip()
+                snippets.append(f"{ct}: {cs}")
+    except Exception:
+        pass
+    
+    # 2. Google News RSS
+    try:
+        url = f"https://news.google.com/rss/search?q={urllib.parse.quote(query)}&hl=vi&gl=VN&ceid=VN:vi"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=3.5) as r:
+            root = ET.fromstring(r.read())
+            items = root.findall('./channel/item')[:5]
+            for it in items:
+                title = it.find('title').text
+                if title and title not in snippets:
+                    snippets.append(title)
+    except Exception:
+        pass
+
+    return snippets
+
+async def smart_search_async(prompt, day, month):
     loop = asyncio.get_event_loop()
     def _search():
-        snippets = []
-        # 1. Google News RSS
-        try:
-            url = f"https://news.google.com/rss/search?q={urllib.parse.quote(query)}&hl=vi&gl=VN&ceid=VN:vi"
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=3.5) as r:
-                root = ET.fromstring(r.read())
-                items = root.findall('./channel/item')[:8]
-                for it in items:
-                    title = it.find('title').text
-                    pub = it.find('pubDate').text if it.find('pubDate') is not None else ''
-                    snippets.append(f"{title} (Cập nhật: {pub[:16]})")
-        except Exception:
-            pass
-
-        # 2. DuckDuckGo HTML
-        try:
-            url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-            with urllib.request.urlopen(req, timeout=3.5) as r:
-                html = r.read().decode('utf-8', errors='ignore')
-                found = re.findall(r'<a class="result__snippet[^>]*>(.*?)</a>', html)
-                for f in found[:4]:
-                    clean = re.sub(r'<[^>]+>', '', f).strip()
-                    if clean and clean not in snippets:
-                        snippets.append(clean)
-        except Exception:
-            pass
-
-        return snippets
+        p_lower = prompt.lower()
+        sports_keywords = ["c1", "champions league", "bóng đá", "ngoại hạng", "lịch thi đấu", "trận nào", "đá bóng", "đối đầu"]
+        if any(k in p_lower for k in sports_keywords):
+            matches = fetch_sports_schedule(prompt)
+            if matches:
+                return "Lịch thi đấu thể thao trực tiếp từ Bongdaplus:\n" + "\n".join(f"- {m}" for m in matches[:15])
+        
+        # General query
+        search_query = f"{prompt} {day}/{month}"
+        snippets = fetch_general_search(search_query)
+        if snippets:
+            return "\n".join(f"- {s}" for s in snippets)
+        return ""
 
     try:
         return await loop.run_in_executor(None, _search)
     except Exception:
-        return []
+        return ""
 
 async def ask_gemini_with_memory(user_prompt):
     global current_key_idx, total_questions_count
@@ -234,22 +291,21 @@ async def ask_gemini_with_memory(user_prompt):
     # Tra cứu Internet thời gian thực nếu câu hỏi liên quan đến tin tức, thể thao, thời sự
     live_context = ""
     if should_search_live(user_prompt):
-        search_query = get_clean_search_query(user_prompt, now.day, now.month)
-        print(f"🔍 [Internet Live] Đang tra cứu dữ liệu mới nhất cho: '{search_query}'...", flush=True)
-        news_items = await fetch_realtime_news_async(search_query)
-        if news_items:
-            live_context = f"\n[Dữ liệu cập nhật Internet thời gian thực lúc {now_str}]:\n" + "\n".join(f"- {item}" for item in news_items)
-            print(f"   -> Thu thập được {len(news_items)} nguồn tin trực tiếp!", flush=True)
+        print(f"🔍 [Internet Live] Đang tra cứu dữ liệu mới nhất cho: '{user_prompt}'...", flush=True)
+        live_data = await smart_search_async(user_prompt, now.day, now.month)
+        if live_data:
+            live_context = f"\n[Dữ liệu Internet thời gian thực cập nhật mới nhất lúc {now_str}]:\n{live_data}\n"
+            print(f"   -> Thu thập được dữ liệu trực tiếp thành công!", flush=True)
 
     enriched_system_prompt = f"""{SYSTEM_PROMPT}
 Thời gian thực tế hiện tại: {now_str}.
-Bạn được trang bị khả năng tra cứu Internet để cập nhật mọi sự kiện, lịch thi đấu, tin tức, tỷ số thể thao mới nhất.
+Bạn được trang bị hệ thống Internet thời gian thực cập nhật dữ liệu tin tức, thể thao, giá cả, thời tiết mới nhất.
 
-Quy tắc ứng xử đặc biệt quan trọng:
+Hướng dẫn trả lời:
 - Luôn xưng "mình" và gọi "bạn".
-- Khi bạn hỏi về lịch thi đấu hoặc thể thao: Hãy luôn trả lời thật cụ thể, hào hứng, tự tin nêu đích danh các cặp đấu tâm điểm tiêu biểu (như Man City, PSG, Real Madrid, Arsenal, Bayern Munich...) cùng khung giờ thi đấu 02h00 rạng sáng.
-- TUYỆT ĐỐI KHÔNG BAO GIỜ nói "kết quả chỉ chung chung", "dữ liệu chưa cụ thể" hay "không tra cứu được". Hãy luôn kết hợp dữ liệu cập nhật với vốn hiểu biết uyên bác của bạn để trả lời như một người bạn am hiểu thể thao thực thụ trong 2 đến 3 câu văn.
-- Không dùng ký hiệu markdown vì câu trả lời sẽ phát trực tiếp ra loa robot.
+- Khi người dùng hỏi về lịch thi đấu: Hãy liệt kê ĐẦY ĐỦ TẤT CẢ các trận đấu diễn ra theo từng khung giờ (ví dụ: khung giờ sớm 23h45 có những trận nào, khung giờ 02h00 rạng sáng có những trận nào). Nêu đích danh từng cặp đấu đối đầu, diễn đạt mạch lạc, nhiệt tình, hào hứng. Tuyệt đối không được bỏ sót trận nào và không được chỉ nêu duy nhất 1 trận.
+- Khi người dùng hỏi về thông tin khác (thời tiết, tin tức, giá vàng): Trả lời chính xác dựa trên dữ liệu trực tiếp, giải thích rõ ràng, súc tích.
+- Tuyệt đối không dùng ký hiệu markdown (như **, ##, gạch đầu dòng, dấu sao) vì câu trả lời sẽ phát trực tiếp ra loa robot. Hãy diễn đạt thành các câu văn xuôi trôi chảy, tự nhiên.
 """
 
     # Xây dựng ngữ cảnh hội thoại có bộ nhớ
