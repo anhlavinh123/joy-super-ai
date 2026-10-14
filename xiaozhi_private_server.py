@@ -654,10 +654,37 @@ async def root_handler(request):
 </html>"""
     return web.Response(text=html, content_type='text/html')
 
+async def ota_handler(request):
+    host = request.headers.get("Host", request.host)
+    proto = "wss" if "onrender.com" in host else "ws"
+    ws_url = f"{proto}://{host}/xiaozhi/v1/"
+    print(f"📦 [OTA Request] Từ {request.remote} (Host: {host}) -> Gửi WebSocket URL: {ws_url}", flush=True)
+    return web.json_response({
+        "status": "ok",
+        "message": "Server is working normally",
+        "server_time": {
+            "timestamp": int(time.time() * 1000),
+            "timezone_offset": 420
+        },
+        "firmware": {
+            "version": "2.1.1"
+        },
+        "websocket": {
+            "url": ws_url
+        }
+    })
+
 def make_app():
     app = web.Application()
     app.router.add_get('/', root_handler)
+    app.router.add_get('/xiaozhi/v1', root_handler)
     app.router.add_get('/xiaozhi/v1/', root_handler)
+    
+    # OTA endpoints
+    for route in ['/xiaozhi/ota/', '/xiaozhi/ota', '/xiaozhi/ota/activate', '/ota/', '/ota', '/ota/activate']:
+        app.router.add_get(route, ota_handler)
+        app.router.add_post(route, ota_handler)
+        
     return app
 
 if __name__ == "__main__":
