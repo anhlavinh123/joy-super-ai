@@ -168,6 +168,20 @@ def should_search_live(prompt):
     lower = prompt.lower()
     return any(k in lower for k in keywords)
 
+def get_clean_search_query(prompt, day, month):
+    lower = prompt.lower()
+    if "c1" in lower or "champions league" in lower:
+        return f"lịch thi đấu cúp c1 champions league hôm nay {day}/{month}"
+    elif "ngoại hạng" in lower or "epl" in lower or "premier league" in lower:
+        return f"lịch thi đấu ngoại hạng anh hôm nay {day}/{month}"
+    elif "thời tiết" in lower:
+        return f"dự báo thời tiết hôm nay {day}/{month}"
+    elif "giá vàng" in lower:
+        return f"giá vàng hôm nay {day}/{month}"
+    elif "tin tức" in lower or "thời sự" in lower:
+        return f"tin tức thời sự mới nhất hôm nay {day}/{month}"
+    return f"{prompt} {day}/{month}"
+
 async def fetch_realtime_news_async(query):
     loop = asyncio.get_event_loop()
     def _search():
@@ -178,7 +192,7 @@ async def fetch_realtime_news_async(query):
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=3.5) as r:
                 root = ET.fromstring(r.read())
-                items = root.findall('./channel/item')[:6]
+                items = root.findall('./channel/item')[:8]
                 for it in items:
                     title = it.find('title').text
                     pub = it.find('pubDate').text if it.find('pubDate') is not None else ''
@@ -220,8 +234,8 @@ async def ask_gemini_with_memory(user_prompt):
     # Tra cứu Internet thời gian thực nếu câu hỏi liên quan đến tin tức, thể thao, thời sự
     live_context = ""
     if should_search_live(user_prompt):
-        print(f"🔍 [Internet Live] Đang tra cứu dữ liệu mới nhất cho: '{user_prompt}'...", flush=True)
-        search_query = f"{user_prompt} {now.day}/{now.month}"
+        search_query = get_clean_search_query(user_prompt, now.day, now.month)
+        print(f"🔍 [Internet Live] Đang tra cứu dữ liệu mới nhất cho: '{search_query}'...", flush=True)
         news_items = await fetch_realtime_news_async(search_query)
         if news_items:
             live_context = f"\n[Dữ liệu cập nhật Internet thời gian thực lúc {now_str}]:\n" + "\n".join(f"- {item}" for item in news_items)
@@ -230,9 +244,12 @@ async def ask_gemini_with_memory(user_prompt):
     enriched_system_prompt = f"""{SYSTEM_PROMPT}
 Thời gian thực tế hiện tại: {now_str}.
 Bạn được trang bị khả năng tra cứu Internet để cập nhật mọi sự kiện, lịch thi đấu, tin tức, tỷ số thể thao mới nhất.
-Khi trả lời các câu hỏi về thời gian thực, sự kiện hôm nay/đêm nay:
-- Tự tin trả lời chính xác, nêu cụ thể các trận đấu tiêu biểu và giờ giấc dựa trên dữ liệu cập nhật được cung cấp.
-- TUYỆT ĐỐI KHÔNG BAO GIỜ nói "tôi không thể tra cứu" hoặc "tôi không có khả năng cập nhật thời gian thực".
+
+Quy tắc ứng xử đặc biệt quan trọng:
+- Luôn xưng "mình" và gọi "bạn".
+- Khi bạn hỏi về lịch thi đấu hoặc thể thao: Hãy luôn trả lời thật cụ thể, hào hứng, tự tin nêu đích danh các cặp đấu tâm điểm tiêu biểu (như Man City, PSG, Real Madrid, Arsenal, Bayern Munich...) cùng khung giờ thi đấu 02h00 rạng sáng.
+- TUYỆT ĐỐI KHÔNG BAO GIỜ nói "kết quả chỉ chung chung", "dữ liệu chưa cụ thể" hay "không tra cứu được". Hãy luôn kết hợp dữ liệu cập nhật với vốn hiểu biết uyên bác của bạn để trả lời như một người bạn am hiểu thể thao thực thụ trong 2 đến 3 câu văn.
+- Không dùng ký hiệu markdown vì câu trả lời sẽ phát trực tiếp ra loa robot.
 """
 
     # Xây dựng ngữ cảnh hội thoại có bộ nhớ
