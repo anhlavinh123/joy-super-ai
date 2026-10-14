@@ -8,8 +8,11 @@ import ctypes
 import re
 import sys
 import time
+import datetime
 import urllib.request
 import urllib.error
+import urllib.parse
+import xml.etree.ElementTree as ET
 import aiohttp
 from aiohttp import web, WSMsgType
 import miniaudio
@@ -156,23 +159,100 @@ async def transcribe_audio(wav_bytes):
         print(f"[Transcribe Error] {e}", flush=True)
         return ""
 
+def should_search_live(prompt):
+    keywords = [
+        "hôm nay", "đêm nay", "tối nay", "ngày mai", "sáng mai", "bóng đá", "c1", "champions league",
+        "ngoại hạng", "thời tiết", "giá vàng", "tin tức", "mới nhất", "kết quả", "tỉ số",
+        "lịch thi đấu", "vừa rồi", "ai thắng", "trận", "bảng xếp hạng", "giá xăng", "thời sự"
+    ]
+    lower = prompt.lower()
+    return any(k in lower for k in keywords)
+
+async def fetch_realtime_news_async(query):
+    loop = asyncio.get_event_loop()
+    def _search():
+        snippets = []
+        # 1. Google News RSS
+        try:
+            url = f"https://news.google.com/rss/search?q={urllib.parse.quote(query)}&hl=vi&gl=VN&ceid=VN:vi"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=3.5) as r:
+                root = ET.fromstring(r.read())
+                items = root.findall('./channel/item')[:6]
+                for it in items:
+                    title = it.find('title').text
+                    pub = it.find('pubDate').text if it.find('pubDate') is not None else ''
+                    snippets.append(f"{title} (Cập nhật: {pub[:16]})")
+        except Exception:
+            pass
+
+        # 2. DuckDuckGo HTML
+        try:
+            url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+            with urllib.request.urlopen(req, timeout=3.5) as r:
+                html = r.read().decode('utf-8', errors='ignore')
+                found = re.findall(r'<a class="result__snippet[^>]*>(.*?)</a>', html)
+                for f in found[:4]:
+                    clean = re.sub(r'<[^>]+>', '', f).strip()
+                    if clean and clean not in snippets:
+                        snippets.append(clean)
+        except Exception:
+            pass
+
+        return snippets
+
+    try:
+        return await loop.run_in_executor(None, _search)
+    except Exception:
+        return []
+
 async def ask_gemini_with_memory(user_prompt):
     global current_key_idx, total_questions_count
     total_questions_count += 1
     
+    # Tính thời gian thực hiện tại (giờ Việt Nam)
+    now = datetime.datetime.now()
+    days = ["Chủ Nhật", "Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy"]
+    day_name = days[int(now.strftime("%w"))]
+    now_str = f"{day_name}, ngày {now.day:02d}/{now.month:02d}/{now.year}, {now.hour:02d}:{now.minute:02d}"
+
+    # Tra cứu Internet thời gian thực nếu câu hỏi liên quan đến tin tức, thể thao, thời sự
+    live_context = ""
+    if should_search_live(user_prompt):
+        print(f"🔍 [Internet Live] Đang tra cứu dữ liệu mới nhất cho: '{user_prompt}'...", flush=True)
+        search_query = f"{user_prompt} {now.day}/{now.month}"
+        news_items = await fetch_realtime_news_async(search_query)
+        if news_items:
+            live_context = f"\n[Dữ liệu cập nhật Internet thời gian thực lúc {now_str}]:\n" + "\n".join(f"- {item}" for item in news_items)
+            print(f"   -> Thu thập được {len(news_items)} nguồn tin trực tiếp!", flush=True)
+
+    enriched_system_prompt = f"""{SYSTEM_PROMPT}
+Thời gian thực tế hiện tại: {now_str}.
+Bạn được trang bị khả năng tra cứu Internet để cập nhật mọi sự kiện, lịch thi đấu, tin tức, tỷ số thể thao mới nhất.
+Khi trả lời các câu hỏi về thời gian thực, sự kiện hôm nay/đêm nay:
+- Tự tin trả lời chính xác, nêu cụ thể các trận đấu tiêu biểu và giờ giấc dựa trên dữ liệu cập nhật được cung cấp.
+- TUYỆT ĐỐI KHÔNG BAO GIỜ nói "tôi không thể tra cứu" hoặc "tôi không có khả năng cập nhật thời gian thực".
+"""
+
     # Xây dựng ngữ cảnh hội thoại có bộ nhớ
     formatted_contents = []
     for turn in conversation_history[-MAX_HISTORY_TURNS:]:
         formatted_contents.append({"role": "user", "parts": [{"text": turn["user"]}]})
         formatted_contents.append({"role": "model", "parts": [{"text": turn["model"]}]})
     
-    formatted_contents.append({"role": "user", "parts": [{"text": user_prompt}]})
+    current_turn_text = user_prompt + live_context if live_context else user_prompt
+    formatted_contents.append({"role": "user", "parts": [{"text": current_turn_text}]})
     
     payload = {
         "systemInstruction": {
-            "parts": [{"text": SYSTEM_PROMPT}]
+            "parts": [{"text": enriched_system_prompt}]
         },
-        "contents": formatted_contents
+        "contents": formatted_contents,
+        "generationConfig": {
+            "thinkingConfig": {"thinkingBudget": 0},
+            "maxOutputTokens": 800
+        }
     }
     
     async with aiohttp.ClientSession() as session:
