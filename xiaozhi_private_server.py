@@ -374,57 +374,33 @@ async def synthesize_speech(text):
     if not clean_text:
         return []
     
-    # 1. Thử Edge TTS với giọng Nam Minh mặc định (100% in-memory)
-    async def _run_edge_tts():
-        comm = edge_tts.Communicate(clean_text, VOICE_NAME)
+    # 1. Thử Edge TTS với giọng Nam Minh mặc định
+    async def _run_edge_tts(voice):
+        comm = edge_tts.Communicate(clean_text, voice)
         mp3_buf = bytearray()
         async for chunk in comm.stream():
             if chunk['type'] == 'audio':
                 mp3_buf.extend(chunk['data'])
-        if len(mp3_buf) > 1000:
+        if len(mp3_buf) > 500:
             decoded = miniaudio.decode(bytes(mp3_buf), nchannels=1, sample_rate=24000, output_format=miniaudio.SampleFormat.SIGNED16)
             pcm_bytes = decoded.samples.tobytes()
             return pcm_to_opus(pcm_bytes, sample_rate=24000, frame_duration_ms=60)
         return []
 
     try:
-        opus_pkts = await asyncio.wait_for(_run_edge_tts(), timeout=15.0)
+        opus_pkts = await asyncio.wait_for(_run_edge_tts(VOICE_NAME), timeout=35.0)
         if opus_pkts:
             return opus_pkts
     except Exception as e:
-        print(f"   [Edge TTS Lỗi: {e}, đang thử lại lần 2...]", flush=True)
+        print(f"   [Edge TTS NamMinh Lỗi: {e}, đang thử lại với Hoài My...]", flush=True)
         try:
-            opus_pkts = await asyncio.wait_for(_run_edge_tts(), timeout=10.0)
+            opus_pkts = await asyncio.wait_for(_run_edge_tts("vi-VN-HoaiMyNeural"), timeout=25.0)
             if opus_pkts:
                 return opus_pkts
-        except Exception:
-            pass
+        except Exception as e2:
+            print(f"   [Edge TTS HoaiMy Lỗi: {e2}]", flush=True)
 
-    # 2. Dự phòng thông minh: Gemini Native TTS 24kHz PCM (chính chủ, 0 độ trễ, không lỗi từ vựng)
-    try:
-        active_key = API_KEYS[current_key_idx]
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={active_key}"
-        payload = {
-            "contents": [{"parts": [{"text": clean_text}]}],
-            "generationConfig": {"responseModalities": ["AUDIO"]}
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8)) as r:
-                if r.status == 200:
-                    res = await r.json()
-                    b64 = res['candidates'][0]['content']['parts'][0]['inlineData']['data']
-                    raw_audio = base64.b64decode(b64)
-                    if raw_audio.startswith(b'RIFF'):
-                        wf = wave.open(io.BytesIO(raw_audio), 'rb')
-                        pcm_data = wf.readframes(wf.getnframes())
-                        sr = wf.getframerate()
-                    else:
-                        pcm_data = raw_audio
-                        sr = 24000
-                    return pcm_to_opus(pcm_data, sample_rate=sr, frame_duration_ms=60)
-    except Exception as e:
-        print(f"[TTS Fallback Error] {e}", flush=True)
-        return []
+    return []
 
 async def handle_websocket(ws, client_ip):
     print(f"\n=======================================================", flush=True)
